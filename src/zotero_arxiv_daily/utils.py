@@ -93,7 +93,7 @@ def send_email(config:DictConfig, html:str):
     receiver = config.email.receiver
     password = config.email.sender_password
     smtp_server = config.email.smtp_server
-    smtp_port = config.email.smtp_port
+    smtp_port = int(config.email.smtp_port)
     def _format_addr(s):
         name, addr = parseaddr(s)
         return formataddr((Header(name, 'utf-8').encode(), addr))
@@ -104,17 +104,47 @@ def send_email(config:DictConfig, html:str):
     today = datetime.datetime.now().strftime('%Y/%m/%d')
     msg['Subject'] = Header(f'Daily arXiv {today}', 'utf-8').encode()
 
-    try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-    except Exception as e:
-        logger.debug(f"Failed to use TLS. {e}\nTry to use SSL.")
-        try:
-            server = smtplib.SMTP_SSL(smtp_server, smtp_port)
-        except Exception as e:
-            logger.debug(f"Failed to use SSL. {e}\nTry to use plain text.")
-            server = smtplib.SMTP(smtp_server, smtp_port)
+    def _connect_ssl():
+        server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
+        server.ehlo()
+        return server
 
-    server.login(sender, password)
-    server.sendmail(sender, [receiver], msg.as_string())
-    server.quit()
+    def _connect_starttls():
+        server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        return server
+
+    def _connect_plain():
+        server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+        server.ehlo()
+        return server
+
+    if smtp_port == 465:
+        connection_candidates = [("SSL", _connect_ssl), ("STARTTLS", _connect_starttls), ("plain SMTP", _connect_plain)]
+    elif smtp_port == 587:
+        connection_candidates = [("STARTTLS", _connect_starttls), ("SSL", _connect_ssl), ("plain SMTP", _connect_plain)]
+    else:
+        connection_candidates = [("STARTTLS", _connect_starttls), ("SSL", _connect_ssl), ("plain SMTP", _connect_plain)]
+
+    last_error = None
+    for connection_name, connect in connection_candidates:
+        server = None
+        try:
+            logger.debug(f"Trying to send email via {connection_name}: {smtp_server}:{smtp_port}")
+            server = connect()
+            server.login(sender, password)
+            server.sendmail(sender, [receiver], msg.as_string())
+            server.quit()
+            return
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Failed to send email via {connection_name}: {e}")
+            if server is not None:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+
+    raise last_error
